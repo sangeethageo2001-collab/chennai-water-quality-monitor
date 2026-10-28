@@ -1,0 +1,8 @@
+streamlit
+geopandas
+pandas
+numpy
+scipy
+plotly
+pillow
+pykrige

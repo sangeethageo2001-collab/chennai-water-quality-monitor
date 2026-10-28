@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link href="https://unpkg.com/maplibre-gl@6.16.0/dist/maplibre-gl.css" rel="stylesheet" />
+<style>
+html,body,#map{margin:0;width:100%;height:100%;font-family:Arial,sans-serif}#map{position:absolute;inset:0}
+.tools{position:absolute;z-index:2;left:12px;top:12px;background:white;padding:9px;border-radius:8px;box-shadow:0 2px 12px #0002;font-size:12px;max-width:225px}
+.tools button{margin-top:7px;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;background:#eff6ff;cursor:pointer}.tools button.active{background:#2563eb;color:white}.tools select{padding:5px;width:100%;margin-top:5px;border-radius:4px;border:1px solid #ccc}
+.legend{position:absolute;z-index:2;bottom:20px;left:12px;background:#fff;padding:10px 12px;border-radius:8px;box-shadow:0 2px 12px #0002;font-size:12px;line-height:1.8}
+.dot{width:11px;height:11px;border-radius:50%;display:inline-block;margin-right:7px}
+#notice{position:absolute;z-index:3;top:8px;left:50%;transform:translateX(-50%);background:#fff4cd;padding:8px;border-radius:4px;display:none}
+.maplibregl-popup-content{line-height:1.6}
+</style></head><body>
+<div id="map"></div><div id="notice"></div>
+<div class="tools"><b>MapLibre basemap</b><select id="styleSelect"></select><div style="margin-top:8px"><b>Camera</b><div><button id="view2d" class="active" type="button">2D view</button> <button id="view3d" type="button">3D view</button></div></div><div style="margin-top:8px"><label><input type="checkbox" id="togglePoints" checked> Sampling points</label></div><div><label><input type="checkbox" id="toggleBoundary" checked> Chennai boundary</label></div></div>
+<div class="legend"><b>__METAL_LABEL__ (mg/L)</b><br><span class="dot" style="background:#198754"></span>Lower: ≤ <span id="low"></span><br><span class="dot" style="background:#f0ad22"></span>Middle: ≤ <span id="mid"></span><br><span class="dot" style="background:#dc3545"></span>Higher: &gt; <span id="high"></span><div style="font-size:10px;color:#555">Relative classes · SYNTHETIC TEST DATA</div></div>
+<script type="module">
+import * as maplibregl from 'https://unpkg.com/maplibre-gl@6.16.0/dist/maplibre-gl.mjs';
+const boundary=__BOUNDARY__, samples=__SAMPLES__, styles=__STYLES__, bounds=__BOUNDS__, metal=__METAL__, q1=__Q1__, q2=__Q2__;
+document.querySelector('.legend b').textContent=metal+' (mg/L)';
+for(const id of ['low','mid','high']) document.getElementById(id).textContent=(id==='low'?q1:q2).toFixed(4);
+const select=document.getElementById('styleSelect');
+for(const key of Object.keys(styles)){const option=document.createElement('option');option.value=key;option.textContent=key;select.appendChild(option);}
+const map=new maplibregl.Map({container:'map',style:styles[select.value],center:[80.25,13.05],zoom:9,attributionControl:true});
+map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'top-right');
+map.addControl(new maplibregl.ScaleControl({unit:'metric'}),'bottom-right');
+map.addControl(new maplibregl.FullscreenControl(),'top-right');
+let fitted=false;
+let is3D=false;
+const terrainTiles='https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+function set3D(enabled){
+  is3D=enabled;
+  document.getElementById('view2d').classList.toggle('active',!enabled);
+  document.getElementById('view3d').classList.toggle('active',enabled);
+  if(!enabled){
+    try{map.setTerrain(null);}catch(e){console.warn('Cannot disable terrain:',e);}
+    map.easeTo({pitch:0,bearing:0,duration:700});
+    return;
+  }
+  map.easeTo({pitch:62,duration:850});
+  attachTerrain();
+}
+function attachTerrain(){
+  if(!is3D)return;
+  // Public Terrarium elevation tiles. If unavailable the tilted view still works.
+  try{
+    if(!map.getSource('chennai-dem'))map.addSource('chennai-dem',{
+      type:'raster-dem',tiles:[terrainTiles],tileSize:256,maxzoom:15,encoding:'terrarium',
+      attribution:'Elevation: AWS Terrain Tiles / Mapzen'
+    });
+    map.setTerrain({source:'chennai-dem',exaggeration:1});
+  }catch(err){console.warn('Terrain not available:',err);}
+}
+function add3DBuildings(){
+  if(!is3D || map.getLayer('chennai-buildings-3d')) return;
+  const style=map.getStyle();
+  const example=style.layers.find(l=>l['source-layer']==='building' && style.sources[l.source] && style.sources[l.source].type==='vector');
+  if(!example)return;
+  try{
+    map.addLayer({id:'chennai-buildings-3d',type:'fill-extrusion',source:example.source,
+      'source-layer':'building',minzoom:13,
+      paint:{'fill-extrusion-color':'#b2b7c0','fill-extrusion-opacity':0.68,
+        'fill-extrusion-height':['coalesce',['to-number',['get','render_height']],['to-number',['get','height']],8],
+        'fill-extrusion-base':['coalesce',['to-number',['get','render_min_height']],['to-number',['get','min_height']],0]}
+    });
+  }catch(err){console.warn('Building layer not available:',err);}
+}
+
+function showOverlays(){
+  // The style.load event is sufficient to add custom sources and layers.
+  // isStyleLoaded() can still be false while external tiles are loading.
+  if(!map.getSource('study'))map.addSource('study',{type:'geojson',data:boundary});
+  if(!map.getSource('samples'))map.addSource('samples',{type:'geojson',data:samples});
+  if(!map.getLayer('study-fill')) map.addLayer({id:'study-fill',type:'fill',source:'study',paint:{'fill-color':'#1c70ad','fill-opacity':0.065}});
+  if(!map.getLayer('study-outline')) map.addLayer({id:'study-outline',type:'line',source:'study',paint:{'line-color':'#145aa5','line-width':2}});
+  if(!map.getLayer('sample-circles')) map.addLayer({id:'sample-circles',type:'circle',source:'samples',paint:{
+    'circle-radius':7,'circle-stroke-width':1.7,'circle-stroke-color':'#ffffff',
+    'circle-color':['case',['<=',['get','value'],q1],'#198754',['<=',['get','value'],q2],'#f0ad22','#dc3545']
+  }});
+  add3DBuildings();
+  attachTerrain();
+  applyVisibility();
+  if(!fitted){map.fitBounds(bounds,{padding:50,maxZoom:12,duration:0});fitted=true;}
+}
+function applyVisibility(){
+  for(const id of ['study-fill','study-outline']) if(map.getLayer(id)) map.setLayoutProperty(id,'visibility',document.getElementById('toggleBoundary').checked?'visible':'none');
+  if(map.getLayer('sample-circles'))map.setLayoutProperty('sample-circles','visibility',document.getElementById('togglePoints').checked?'visible':'none');
+}
+map.on('style.load',showOverlays);
+document.getElementById('view2d').addEventListener('click',()=>set3D(false));
+document.getElementById('view3d').addEventListener('click',()=>set3D(true));
+// Handle styles that load before the listener is triggered.
+if (map.isStyleLoaded()) showOverlays();
+map.on('click','sample-circles',(event)=>{
+ const f=event.features&&event.features[0];if(!f)return;
+ const p=f.properties;
+ const el=document.createElement('div');
+ const title=document.createElement('b');title.textContent=p.site;el.appendChild(title);
+ for(const [k,v] of [['Metal',p.metal],['Concentration',Number(p.value).toFixed(5)+' mg/L'],['Latitude',p.latitude],['Longitude',p.longitude]]){
+   const div=document.createElement('div');div.textContent=k+': '+v;el.appendChild(div);
+ }
+ new maplibregl.Popup({offset:12}).setLngLat(event.lngLat).setDOMContent(el).addTo(map);
+});
+map.on('mouseenter','sample-circles',()=>map.getCanvas().style.cursor='pointer');
+map.on('mouseleave','sample-circles',()=>map.getCanvas().style.cursor='');
+select.addEventListener('change',()=>{ map.setStyle(styles[select.value]); });
+for(const id of ['toggleBoundary','togglePoints'])document.getElementById(id).addEventListener('change',applyVisibility);
+map.on('error',(event)=>{console.warn('MapLibre:',event.error);const n=document.getElementById('notice');n.style.display='block';n.textContent='Basemap unavailable? Select “No basemap (offline overlays)” above.';});
+</script></body></html>
