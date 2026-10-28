@@ -11,23 +11,34 @@ ROOT=Path(__file__).resolve().parent
 DATA=ROOT/'Data'
 METALS={'Lead (Pb)':'Pb_mg_L','Cadmium (Cd)':'Cd_mg_L','Chromium (Cr)':'Cr_mg_L','Arsenic (As)':'As_mg_L','Mercury (Hg)':'Hg_mg_L','Nickel (Ni)':'Ni_mg_L','Copper (Cu)':'Cu_mg_L','Zinc (Zn)':'Zn_mg_L','Iron (Fe)':'Fe_mg_L','Manganese (Mn)':'Mn_mg_L'}
 
+
 @st.cache_data
 def load_data():
     boundary = gpd.read_file(
-    Path(__file__).resolve().parent / "Chennai_new.shp"
-)
+        ROOT / "Chennai_new.shp"
+    )
 
-points = gpd.read_file(
-    Path(__file__).resolve().parent / "Point_Data.shp"
-)
+    points = gpd.read_file(
+        ROOT / "Point_Data.shp"
+    )
+
     if boundary.crs is None or points.crs is None:
-        raise ValueError('Your GIS layers need a correct source coordinate reference system (CRS).')
-    return boundary.to_crs('EPSG:4326'),points.to_crs('EPSG:4326')
+        raise ValueError(
+            "GIS layers are missing coordinate reference systems."
+        )
+
+    return (
+        boundary.to_crs("EPSG:4326"),
+        points.to_crs("EPSG:4326")
+    )
+
 
 try:
-    boundary,points=load_data()
+    boundary, points = load_data()
 except Exception as exc:
-    st.error(f'Unable to load GIS layers: {exc}'); st.stop()
+    st.error(f"Unable to load GIS layers: {exc}")
+    st.stop()
+
 
 # Optional real temperature data: CSV keyed by Site_ID with Temperature_C column.
 # Existing temperature shapefile fields are also detected (DBF field name may truncate).
