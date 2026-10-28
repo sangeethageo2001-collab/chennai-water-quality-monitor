@@ -13,8 +13,13 @@ METALS={'Lead (Pb)':'Pb_mg_L','Cadmium (Cd)':'Cd_mg_L','Chromium (Cr)':'Cr_mg_L'
 
 @st.cache_data
 def load_data():
-    boundary=gpd.read_file(DATA/'Chennai_new.shp')
-    points=gpd.read_file(DATA/'Point_Data.shp')
+    boundary = gpd.read_file(
+    Path(__file__).resolve().parent / "Chennai_new.shp"
+)
+
+points = gpd.read_file(
+    Path(__file__).resolve().parent / "Point_Data.shp"
+)
     if boundary.crs is None or points.crs is None:
         raise ValueError('Your GIS layers need a correct source coordinate reference system (CRS).')
     return boundary.to_crs('EPSG:4326'),points.to_crs('EPSG:4326')
