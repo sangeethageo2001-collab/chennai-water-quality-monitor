@@ -3,24 +3,129 @@
 <link href="https://unpkg.com/maplibre-gl@6.16.0/dist/maplibre-gl.css" rel="stylesheet" />
 <style>
 html,body,#map{margin:0;width:100%;height:100%;font-family:Arial,sans-serif}#map{position:absolute;inset:0}
-.tools{position:absolute;z-index:2;left:12px;top:12px;background:white;padding:9px;border-radius:8px;box-shadow:0 2px 12px #0002;font-size:12px;max-width:225px}
-.tools button{margin-top:7px;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;background:#eff6ff;cursor:pointer}.tools button.active{background:#2563eb;color:white}.tools select{padding:5px;width:100%;margin-top:5px;border-radius:4px;border:1px solid #ccc}
-.legend{position:absolute;z-index:2;bottom:20px;left:12px;background:#fff;padding:10px 12px;border-radius:8px;box-shadow:0 2px 12px #0002;font-size:12px;line-height:1.8}
+.tools{position:absolute;z-index:2;left:12px;top:12px;background:rgba(248,253,255,.97);padding:9px;border-radius:8px;box-shadow:0 3px 13px #073b5d24;border:1px solid #b7e2eb;font-size:12px;max-width:225px}
+.tools button{margin-top:7px;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;background:#e6f8fb;color:#075c7d;cursor:pointer}.tools button.active{background:#087eac;color:white}.tools select{padding:5px;width:100%;margin-top:5px;border-radius:4px;border:1px solid #ccc}
+.legend{position:absolute;z-index:2;bottom:12px;left:12px;width:222px;max-width:calc(100vw - 36px);max-height:180px;overflow:auto;background:rgba(248,253,255,.96);border:1px solid #b7e2eb;padding:8px 9px;border-radius:8px;box-shadow:0 2px 12px #0003;color:#073b5d;font-size:10px;line-height:1.35;box-sizing:border-box} .legend b{font-size:11px}.legend .legend-details{margin-top:5px;border-top:1px solid #e5e7eb;padding-top:4px}.legend details summary{cursor:pointer;font-weight:600;color:#334155;margin-top:4px}.legend .legend-row{display:flex;align-items:center;gap:5px;margin-top:2px}
+.riskchip{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:3px;flex-shrink:0}.gradient{width:100%;height:8px;border-radius:3px;background:linear-gradient(to right,#28914b,#ffff70,#f02828);margin:3px 0}
 .dot{width:11px;height:11px;border-radius:50%;display:inline-block;margin-right:7px}
+#saveLayout{position:absolute;z-index:7;right:10px;top:172px;left:auto;display:flex;align-items:center;justify-content:center;width:36px;height:36px;margin:0;font-size:22px;background:#087EAC;color:#fff;border:1px solid #B7E2EB;font-weight:700;border-radius:9px;padding:0;cursor:pointer;box-shadow:0 3px 12px #073b5d30}
+#saveLayout:hover{background:#075e70}
+#exportStatus{position:absolute;z-index:8;top:213px;right:10px;left:auto;max-width:255px;font-size:11px;color:#073B5D;background:rgba(255,255,255,.94);border-radius:6px;padding:0 5px}#exportStatus:empty{display:none}
 #notice{position:absolute;z-index:3;top:8px;left:50%;transform:translateX(-50%);background:#fff4cd;padding:8px;border-radius:4px;display:none}
 .maplibregl-popup-content{line-height:1.6}
+
+/* Aqua Ocean MapLibre controls matching Streamlit shell */
+.tools{border:1px solid #B7E2EB!important;background:rgba(255,255,255,.94)!important;border-radius:10px!important;box-shadow:0 3px 12px #073b5d22!important;color:#073B5D!important;}
+.tools b{color:#073B5D!important;}
+.tools select,.tools button{border-color:#B7E2EB!important;border-radius:7px!important;}
+.tools button.active,#saveLayout{background:#087EAC!important;color:white!important;}
+.tools button.active:hover,#saveLayout:hover{background:#075f81!important;}
+.legend{border:1px solid #B7E2EB!important;border-radius:9px!important;background:rgba(255,255,255,.95)!important;box-shadow:0 3px 12px #073b5d22!important;}
+.legend b{color:#073B5D!important;}
+.maplibregl-ctrl-group{border-radius:9px!important;overflow:hidden!important;box-shadow:0 3px 12px #073b5d20!important;}
+
+/* Compact map-settings launcher: the satellite imagery remains unobstructed. */
+.map-tools-toggle{position:absolute;left:12px;top:12px;z-index:9;display:flex;align-items:center;justify-content:center;width:38px;height:38px;padding:0;background:#fff;color:#087EAC;border:1px solid #B7E2EB;border-radius:9px;cursor:pointer;box-shadow:0 3px 12px #073b5d30}
+.map-tools-toggle:hover,.map-tools-toggle[aria-expanded="true"]{background:#E8F7FB;color:#073B5D}
+.tools#mapToolsPanel{top:56px;left:12px;width:218px;max-width:calc(100vw - 24px);max-height:min(330px,calc(100vh - 72px));overflow:auto;box-sizing:border-box;z-index:10}
+.tools#mapToolsPanel[hidden]{display:none!important}
+.map-tools-toggle:focus-visible,.tools#mapToolsPanel :focus-visible{outline:2px solid #087EAC;outline-offset:2px}
 </style></head><body>
 <div id="map"></div><div id="notice"></div>
-<div class="tools"><b>MapLibre basemap</b><select id="styleSelect"></select><div style="margin-top:8px"><b>Camera</b><div><button id="view2d" class="active" type="button">2D view</button> <button id="view3d" type="button">3D view</button></div></div><div style="margin-top:8px"><label><input type="checkbox" id="togglePoints" checked> Sampling points</label></div><div><label><input type="checkbox" id="toggleBoundary" checked> Chennai boundary</label></div><div><label><input type="checkbox" id="toggleSurface" checked> IDW / Kriging surface</label></div></div>
-<div class="legend"><b>__METAL_LABEL__</b><br><span class="dot" style="background:#198754"></span>Lower: ≤ <span id="low"></span><br><span class="dot" style="background:#f0ad22"></span>Middle: ≤ <span id="mid"></span><br><span class="dot" style="background:#dc3545"></span>Higher: &gt; <span id="high"></span><div style="font-size:10px;color:#555">Relative classes · SYNTHETIC TEST DATA</div></div>
+<div id="mapStatus" role="status" style="position:absolute;z-index:6;left:12px;top:12px;right:12px;max-width:440px;padding:12px;background:#fff;border-radius:8px;box-shadow:0 1px 8px #0003;color:#29364b;font:13px Arial">Loading MapLibre satellite map… If this message stays visible, check internet access and browser developer console.</div>
+<button id="mapToolsToggle" class="map-tools-toggle" type="button" title="Map settings and layers" aria-label="Open map settings and layers" aria-expanded="false" aria-controls="mapToolsPanel">
+<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg>
+</button>
+<div class="tools" id="mapToolsPanel" hidden><b>MapLibre basemap</b><select id="styleSelect"></select><div style="margin-top:8px"><b>Camera</b><div><button id="view2d" class="active" type="button">2D view</button> <button id="view3d" type="button">3D view</button></div></div><div style="margin-top:8px"><label><input type="checkbox" id="togglePoints" checked> Sampling points</label></div><div><label><input type="checkbox" id="toggleBoundary" checked> Study boundary</label></div></div>
+<button id="saveLayout" class="map-download" type="button" title="Download map image (PNG)" aria-label="Download map image as PNG">⬇</button>
+<div id="exportStatus" aria-live="polite"></div>
+<div class="legend" aria-label="Unified spatial interpolation and risk legend">
+ <b id="legendTitle">Sampling locations</b>
+ <div class="legend-row"><span class="dot" id="legendDot"></span><span id="legendText"></span></div>
+ <div id="surfaceLegend" style="display:none" class="legend-details">
+   <b id="surfaceTitle">Interpolation</b>
+   <div id="valueGradient" class="gradient"></div>
+   <div style="display:flex;justify-content:space-between;font-size:10px"><span id="rasterMin"></span><span id="rasterMax"></span></div>
+   <div id="riskAreaLegend" style="display:none">
+     <div class="legend-row"><span class="riskchip" style="background:#22c55e"></span>Not flagged</div>
+     <div class="legend-row"><span class="riskchip" style="background:#facc15"></span>Moderate</div>
+     <div class="legend-row"><span class="riskchip" style="background:#ef4444"></span>High</div>
+   </div>
+   <details>
+     <summary>Threshold and area details</summary>
+     <div id="riskLegend" style="margin-top:4px;overflow-wrap:anywhere"></div>
+     <div id="riskAreaValue" style="margin-top:3px;overflow-wrap:anywhere"></div>
+     <div style="color:#667085;margin-top:3px">Estimated screening only; not proof of safety.</div>
+     <div id="pointExplanation" style="color:#667085;margin-top:3px">Gold halo = model-predicted flagged site.</div>
+   </details>
+ </div>
+</div>
 <script type="module">
 import * as maplibregl from 'https://unpkg.com/maplibre-gl@6.16.0/dist/maplibre-gl.mjs';
-const boundary=__BOUNDARY__, samples=__SAMPLES__, styles=__STYLES__, bounds=__BOUNDS__, metal=__METAL__, q1=__Q1__, q2=__Q2__, surfaceImage=__OVERLAY__, surfaceBounds=__OVERLAY_BOUNDS__, unit=__UNIT__;
-document.querySelector('.legend b').textContent=metal+' ('+unit+')';
-for(const id of ['low','mid','high']) document.getElementById(id).textContent=(id==='low'?q1:q2).toFixed(4);
+const boundary=__BOUNDARY__, samples=__SAMPLES__, styles=__STYLES__, bounds=__BOUNDS__, metal=__METAL__, q1=__Q1__, q2=__Q2__, surfaceImage=__OVERLAY__, surfaceBounds=__OVERLAY_BOUNDS__, unit=__UNIT__, rasterOpacity=__RASTER_OPACITY__, defaultShowPoints=__SHOW_POINTS__, defaultShowBoundary=__SHOW_BOUNDARY__, pointColor=__POINT_COLOR__, defaultBasemap=__DEFAULT_BASEMAP__, parameterLabel=__PARAMETER_LABEL__, parameterGroup=__PARAMETER_GROUP__, interpMethod=__INTERP_METHOD__, interpRange=__INTERP_RANGE__, riskThreshold=__RISK_THRESHOLD__, riskDirection=__RISK_DIRECTION__, riskReference=__RISK_REFERENCE__, riskZoneImage=__RISK_ZONE_IMAGE__, riskZoneArea=__RISK_ZONE_AREA__, moderateFraction=__MODERATE_FRACTION__;
+document.getElementById('legendTitle').textContent = parameterLabel + (unit && unit !== 'unit unspecified' && unit !== 'index' ? ' (' + unit + ')' : '');
+document.getElementById('legendDot').style.background = pointColor;
+document.getElementById('legendText').textContent = parameterGroup + ' sampling points';
+const surfaceLegend=document.getElementById('surfaceLegend');
+function formatValue(v){return Number(v).toLocaleString(undefined,{maximumSignificantDigits:5});}
+if(surfaceImage && Array.isArray(interpRange) && interpRange.length===2){
+ surfaceLegend.style.display='block';
+ document.getElementById('surfaceTitle').textContent=interpMethod+' estimated value range ('+unit+')';
+ document.getElementById('rasterMin').textContent=formatValue(interpRange[0]);
+ document.getElementById('rasterMax').textContent=formatValue(interpRange[1]);
+ if(riskThreshold!==null && riskReference){
+  document.getElementById('riskLegend').textContent='Screening reference: '+riskDirection+' '+formatValue(riskThreshold)+' '+unit+' · '+riskReference;
+ }
+ if(riskZoneImage){
+  document.getElementById('riskAreaLegend').style.display='block';
+  if(riskZoneArea && typeof riskZoneArea==='object') document.getElementById('riskAreaValue').textContent='Area (approx.): High '+Number(riskZoneArea.high).toFixed(2)+' km² · Moderate '+Number(riskZoneArea.moderate).toFixed(2)+' km² · Not flagged '+Number(riskZoneArea.low).toFixed(2)+' km². Moderate cutoff: '+Math.round(moderateFraction*100)+'% of reference (application-defined).';
+ }
+}
+// Expand only on demand so the basemap, camera and layer options do not cover the map.
+const toolsToggle=document.getElementById('mapToolsToggle');
+const toolsPanel=document.getElementById('mapToolsPanel');
+function setToolsOpen(open){
+  toolsPanel.hidden=!open;
+  toolsToggle.setAttribute('aria-expanded',String(open));
+  toolsToggle.setAttribute('aria-label',open?'Close map settings and layers':'Open map settings and layers');
+}
+toolsToggle.addEventListener('click',()=>setToolsOpen(toolsPanel.hidden));
+document.addEventListener('pointerdown',event=>{
+  if(!toolsPanel.hidden && !toolsPanel.contains(event.target) && !toolsToggle.contains(event.target)) setToolsOpen(false);
+});
+document.addEventListener('keydown',event=>{
+  if(event.key==='Escape' && !toolsPanel.hidden){setToolsOpen(false);toolsToggle.focus();}
+});
 const select=document.getElementById('styleSelect');
 for(const key of Object.keys(styles)){const option=document.createElement('option');option.value=key;option.textContent=key;select.appendChild(option);}
-const map=new maplibregl.Map({container:'map',style:styles[select.value],center:[80.25,13.05],zoom:9,attributionControl:true});
+select.value = Object.hasOwn(styles, defaultBasemap) ? defaultBasemap : 'Satellite (Esri World Imagery)';
+document.getElementById('togglePoints').checked=defaultShowPoints;
+document.getElementById('toggleBoundary').checked=defaultShowBoundary;
+// Unified display: risk classes are the classification of the SAME interpolation grid.
+// Without a documented limit, show interpolated values, not invented risk zones.
+const hasRisk=Boolean(riskZoneImage);
+function riskMode(){return hasRisk;}
+function updateLegend(){
+  const isRisk=hasRisk;
+  document.getElementById('valueGradient').style.display=isRisk?'none':'block';
+  document.getElementById('riskAreaLegend').style.display=isRisk?'block':'none';
+  document.getElementById('pointExplanation').textContent='Sampling marker colour = parameter group; gold ring = predicted flagged site.';
+  document.getElementById('surfaceTitle').textContent=(interpMethod||'IDW')+
+    (isRisk?' interpolated risk classification':' interpolated values (reference limit unavailable)');
+}
+updateLegend();
+
+const highlightActive = __HIGHLIGHT_ACTIVE__;
+const mapStatus=document.getElementById('mapStatus');
+let map;
+try {
+map=new maplibregl.Map({container:'map',style:styles[select.value],center:[80.25,13.05],zoom:9,attributionControl:true,preserveDrawingBuffer:true});
+} catch(err) {
+  mapStatus.textContent='Map initialization failed: '+err.message+'. Check browser WebGL and MapLibre script access.';
+  throw err;
+}
+map.on('load',()=>{mapStatus.style.display='none';});
+map.on('style.load',()=>{mapStatus.style.display='none';});
 map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'top-right');
 map.addControl(new maplibregl.ScaleControl({unit:'metric'}),'bottom-right');
 map.addControl(new maplibregl.FullscreenControl(),'top-right');
@@ -73,13 +178,19 @@ function showOverlays(){
   if(!map.getLayer('study-fill')) map.addLayer({id:'study-fill',type:'fill',source:'study',paint:{'fill-color':'#1c70ad','fill-opacity':0.065}});
   if(surfaceImage && surfaceBounds){
     if(!map.getSource('interpolated-surface')) map.addSource('interpolated-surface',{type:'image',url:surfaceImage,coordinates:[[surfaceBounds[0],surfaceBounds[3]],[surfaceBounds[2],surfaceBounds[3]],[surfaceBounds[2],surfaceBounds[1]],[surfaceBounds[0],surfaceBounds[1]]]});
-    if(!map.getLayer('interpolated-surface-layer')) map.addLayer({id:'interpolated-surface-layer',type:'raster',source:'interpolated-surface',paint:{'raster-opacity':0.62,'raster-fade-duration':0}});
+    if(!map.getLayer('interpolated-surface-layer')) map.addLayer({id:'interpolated-surface-layer',type:'raster',source:'interpolated-surface',paint:{'raster-opacity':rasterOpacity,'raster-fade-duration':0}});
+  }
+  if(riskZoneImage && surfaceBounds){
+    if(!map.getSource('risk-zones')) map.addSource('risk-zones', {type:'image',url:riskZoneImage,coordinates:[[surfaceBounds[0],surfaceBounds[3]],[surfaceBounds[2],surfaceBounds[3]],[surfaceBounds[2],surfaceBounds[1]],[surfaceBounds[0],surfaceBounds[1]]]});
+    if(!map.getLayer('risk-zones-layer')) map.addLayer({id:'risk-zones-layer',type:'raster',source:'risk-zones',paint:{'raster-opacity':rasterOpacity,'raster-fade-duration':0,'raster-resampling':'nearest'}});
   }
   if(!map.getLayer('study-outline')) map.addLayer({id:'study-outline',type:'line',source:'study',paint:{'line-color':'#145aa5','line-width':2}});
   if(!map.getLayer('sample-circles')) map.addLayer({id:'sample-circles',type:'circle',source:'samples',paint:{
     'circle-radius':7,'circle-stroke-width':1.7,'circle-stroke-color':'#ffffff',
-    'circle-color':['case',['<=',['get','value'],q1],'#198754',['<=',['get','value'],q2],'#f0ad22','#dc3545']
+    'circle-color':pointColor
   }});
+  if(!map.getLayer('risk-halo')) map.addLayer({id:'risk-halo',type:'circle',source:'samples',filter:['==',['get','predicted_flagged'],true],paint:{'circle-radius':11,'circle-color':'rgba(0,0,0,0)','circle-stroke-color':'#ffd000','circle-stroke-width':3}});
+  if(highlightActive && !map.getLayer('selected-sites-halo')) map.addLayer({id:'selected-sites-halo',type:'circle',source:'samples',filter:['==',['get','is_highlighted'],true],paint:{'circle-radius':14,'circle-color':'rgba(0,0,0,0)','circle-stroke-color':'#00f5ff','circle-stroke-width':3}});
   add3DBuildings();
   attachTerrain();
   applyVisibility();
@@ -87,8 +198,11 @@ function showOverlays(){
 }
 function applyVisibility(){
   for(const id of ['study-fill','study-outline']) if(map.getLayer(id)) map.setLayoutProperty(id,'visibility',document.getElementById('toggleBoundary').checked?'visible':'none');
-  if(map.getLayer('interpolated-surface-layer'))map.setLayoutProperty('interpolated-surface-layer','visibility',document.getElementById('toggleSurface').checked?'visible':'none');
-  if(map.getLayer('sample-circles'))map.setLayoutProperty('sample-circles','visibility',document.getElementById('togglePoints').checked?'visible':'none');
+  updateLegend();
+  if(map.getLayer('sample-circles'))map.setPaintProperty('sample-circles','circle-color',pointColor);
+  if(map.getLayer('interpolated-surface-layer'))map.setLayoutProperty('interpolated-surface-layer','visibility',(!hasRisk?'visible':'none'));
+  if(map.getLayer('risk-zones-layer'))map.setLayoutProperty('risk-zones-layer','visibility',(hasRisk?'visible':'none'));
+  for(const id of ['sample-circles','risk-halo','selected-sites-halo']) if(map.getLayer(id))map.setLayoutProperty(id,'visibility',document.getElementById('togglePoints').checked?'visible':'none');
 }
 map.on('style.load',showOverlays);
 document.getElementById('view2d').addEventListener('click',()=>set3D(false));
@@ -100,14 +214,130 @@ map.on('click','sample-circles',(event)=>{
  const p=f.properties;
  const el=document.createElement('div');
  const title=document.createElement('b');title.textContent=p.site;el.appendChild(title);
- for(const [k,v] of [['Metal',p.metal],['Concentration',Number(p.value).toFixed(5)+' '+unit],['Latitude',p.latitude],['Longitude',p.longitude]]){
+ for(const [k,v] of [['Parameter',parameterLabel],['Value',Number(p.value).toFixed(5)+' '+unit],['Latitude',p.latitude],['Longitude',p.longitude],['Observed site class',p.observed_class],['LOO model flag',p.predicted_flagged?'Flagged (threshold screen)':'Not flagged or unavailable']]){
    const div=document.createElement('div');div.textContent=k+': '+v;el.appendChild(div);
  }
  new maplibregl.Popup({offset:12}).setLngLat(event.lngLat).setDOMContent(el).addTo(map);
 });
 map.on('mouseenter','sample-circles',()=>map.getCanvas().style.cursor='pointer');
 map.on('mouseleave','sample-circles',()=>map.getCanvas().style.cursor='');
+// Save the CURRENT MapLibre viewport (including the selected basemap,
+// interpolation/risk raster, sampling points and study boundary) with a
+// printable title and compact legend added BELOW the map, not over it.
+function wrapText(ctx, text, x, y, maxWidth, lineHeight, maxLines=3){
+  const words=String(text).split(/\s+/); let line='';let used=0;
+  for(const word of words){
+    const test=line?line+' '+word:word;
+    if(ctx.measureText(test).width>maxWidth && line){
+      ctx.fillText(line,x,y); y+=lineHeight;used++;line=word;
+      if(used>=maxLines-1)break;
+    }else line=test;
+  }
+  if(line)ctx.fillText(line,x,y);
+}
+async function captureRenderedMap(){
+  const deadline=Date.now()+12000;
+  return new Promise((resolve,reject)=>{
+    let attempts=0,done=false;
+    const canvas=map.getCanvas();
+    function fail(error){if(!done){done=true;reject(error);}}
+    function check(){
+      if(done)return;
+      attempts++;
+      try{
+        const src=map.getCanvas();
+        const snap=document.createElement('canvas');
+        snap.width=src.width;snap.height=src.height;
+        if(!snap.width || !snap.height)throw new Error('Map canvas has zero dimensions');
+        const g=snap.getContext('2d',{willReadFrequently:true});
+        g.drawImage(src,0,0);
+        // Discard all-white/all-transparent exports instead of calling them successful.
+        const pix=g.getImageData(0,0,snap.width,snap.height).data;
+        let visible=0;
+        const columns=11,rows=8;
+        for(let iy=1;iy<rows;iy++)for(let ix=1;ix<columns;ix++){
+          const x=Math.floor((ix/columns)*snap.width),y=Math.floor((iy/rows)*snap.height);
+          const k=4*(y*snap.width+x);
+          if(pix[k+3]>16 && (pix[k]<242 || pix[k+1]<242 || pix[k+2]<242))visible++;
+        }
+        if(visible>=5){done=true;resolve(snap);return;}
+      }catch(error){
+        // A tainted canvas cannot be exported under browser cross-origin rules.
+        if(error.name==='SecurityError'){fail(new Error('Satellite tile server blocked canvas export (CORS). Switch basemap or use a permitted tile source.'));return;}
+        if(attempts>=7){fail(error);return;}
+      }
+      if(attempts>=7 || Date.now()>deadline){
+        fail(new Error('Map image is blank. Please wait for the satellite tiles, move the map slightly, and try again.'));
+        return;
+      }
+      map.once('render',check);
+      map.triggerRepaint();
+    }
+    map.once('render',check);
+    map.triggerRepaint();
+    setTimeout(()=>fail(new Error('Map render timed out. Try switching basemap and back.')),12500);
+  });
+}
+async function saveMapLayout(){
+  const status=document.getElementById('exportStatus');
+  const button=document.getElementById('saveLayout');
+  button.disabled=true;status.style.display='block';status.textContent='Preparing map PNG…';
+  try{
+    // If tiles remain loading, attempt a current-frame export rather than hang.
+    if(!map.isStyleLoaded())await new Promise(resolve=>{
+      map.once('style.load',resolve);
+      setTimeout(resolve,3500);
+    });
+    const source=await captureRenderedMap();
+    const scale=1.5;
+    const mapWidth=Math.round(source.width*scale),mapHeight=Math.round(source.height*scale);
+    const footerHeight=132*scale;
+    const out=document.createElement('canvas');
+    out.width=mapWidth;out.height=mapHeight+footerHeight;
+    const ctx=out.getContext('2d');
+    ctx.fillStyle='#ffffff';ctx.fillRect(0,0,out.width,out.height);
+    ctx.drawImage(source,0,0,mapWidth,mapHeight);
+    const pad=22*scale;
+    const top=mapHeight+pad;
+    ctx.fillStyle='#0b4e68';ctx.font=`bold ${20*scale}px Arial`;
+    ctx.fillText('AquaSpatial — Geospatial Water Quality Intelligence',pad,top);
+    ctx.font=`${12*scale}px Arial`;ctx.fillStyle='#36536a';
+    const label=parameterLabel+' · '+(interpMethod||'Spatial analysis')+' · '+(riskReference||'Unclassified values');
+    wrapText(ctx,label,pad,top+23*scale,mapWidth-pad*2,17*scale,2);
+    const categoryY=mapHeight+80*scale;
+    if(hasRisk){
+      for(const [i,c] of ['#22c55e','#facc15','#ef4444'].entries()){
+        const x=pad+i*(145*scale);
+        ctx.fillStyle=c;ctx.fillRect(x,categoryY,13*scale,13*scale);
+        ctx.fillStyle='#193b4a';ctx.font=`${11*scale}px Arial`;
+        ctx.fillText(['Not flagged','Moderate','High'][i],x+18*scale,categoryY+11*scale);
+      }
+    }else{
+      ctx.fillStyle=pointColor;ctx.beginPath();ctx.arc(pad+7*scale,categoryY+7*scale,6*scale,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#193b4a';ctx.font=`${11*scale}px Arial`;
+      ctx.fillText(parameterGroup+' samples',pad+19*scale,categoryY+11*scale);
+    }
+    ctx.fillStyle='#506477';ctx.font=`${10*scale}px Arial`;
+    ctx.fillText('Spatial predictions are screening estimates, not verified water safety.',pad,mapHeight+113*scale);
+    const blob=await new Promise((resolve,reject)=>out.toBlob(b=>b?resolve(b):reject(new Error('PNG encoding failed')),'image/png'));
+    const url=URL.createObjectURL(blob);
+    const link=document.createElement('a');link.href=url;
+    link.download='water_quality_'+String(parameterLabel).replace(/[^a-z0-9]+/gi,'_')+'_'+(interpMethod||'map')+'.png';
+    document.body.appendChild(link);link.click();link.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),15000);
+    status.textContent='PNG download started.';
+  }catch(err){
+    status.textContent='Export failed: '+err.message;
+    console.error('Map PNG export:',err);
+  }finally{
+    button.disabled=false;
+    setTimeout(()=>{status.style.display='none';},7000);
+  }
+}
+document.getElementById('saveLayout').addEventListener('click',saveMapLayout);
+
 select.addEventListener('change',()=>{ map.setStyle(styles[select.value]); });
-for(const id of ['toggleBoundary','togglePoints','toggleSurface'])document.getElementById(id).addEventListener('change',applyVisibility);
-map.on('error',(event)=>{console.warn('MapLibre:',event.error);const n=document.getElementById('notice');n.style.display='block';n.textContent='Basemap unavailable? Select “No basemap (offline overlays)” above.';});
+for(const id of ['toggleBoundary','togglePoints'])document.getElementById(id).addEventListener('change',applyVisibility);
+
+map.on('error',(event)=>{console.warn('MapLibre:',event.error);const n=document.getElementById('notice');n.style.display='block';n.textContent='Map tile/overlay error. Try Streets or No basemap from the dropdown.';});
 </script></body></html>

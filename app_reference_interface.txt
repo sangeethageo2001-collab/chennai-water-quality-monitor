@@ -1,0 +1,594 @@
+"""Upload-only Streamlit GIS: multiple boundaries/CSV files, explicit Run, reviewed schema mapping."""
+from pathlib import Path
+import hashlib
+import io
+import re
+import tempfile
+import zipfile
+
+import shapefile  # pyshp: geometry-only shapefile reading without .dbf
+from pyproj import CRS
+from shapely.geometry import shape
+
+import geopandas as gpd
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
+from maplibre_streamlit import show_maplibre
+from interpolation import create_surface
+from piper_plot import render_piper_panel
+from water_indices import calculate_indices, METAL_COLUMNS
+from reference_limits import PRESET_NAME, SOURCE_URL, reference_dataframe, field_to_standard
+
+st.set_page_config(page_title="Water Quality GIS Monitor", layout="wide", initial_sidebar_state="expanded")
+
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_ZIP_UNPACKED = 100 * 1024 * 1024
+METALS = {
+    "Lead (Pb)": "Pb_mg_L", "Cadmium (Cd)": "Cd_mg_L",
+    "Chromium (Cr)": "Cr_mg_L", "Arsenic (As)": "As_mg_L",
+    "Mercury (Hg)": "Hg_mg_L", "Nickel (Ni)": "Ni_mg_L",
+    "Copper (Cu)": "Cu_mg_L", "Zinc (Zn)": "Zn_mg_L",
+    "Iron (Fe)": "Fe_mg_L", "Manganese (Mn)": "Mn_mg_L",
+}
+
+
+@st.dialog("Piper Plot — Hydrochemical Facies", width="large")
+def open_piper_plot(samples):
+    """Display the Piper diagram and hydrochemical classification for uploaded records."""
+    render_piper_panel(samples)
+
+
+@st.dialog("Water Pollution Indices — WQI / HPI / WPI", width="large")
+def open_indices_panel(samples, dataset_signature):
+    st.caption("Automatically filled reference limits are a *drinking-water screening preset*, not limits inferred from your CSV. Check water type, units, species and edition before reporting.")
+    method = st.selectbox("Index", ["WQI", "HPI", "WPI"], key="indices_method")
+    preset = st.selectbox("Reference standard", [PRESET_NAME, "Manual — enter my own limits"], key="reference_preset")
+    excluded = {"Latitude", "Longitude", "Site_ID", "Site_Name", "Source_File", "Dataset_Year", "Data_Status", "geometry"}
+    candidates = [c for c in samples.columns if c not in excluded
+                  and not str(c).startswith("__")
+                  and pd.to_numeric(samples[c], errors="coerce").notna().any()]
+    if method == "HPI":
+        candidates = [c for c in candidates if c in METAL_COLUMNS]
+    if not candidates:
+        st.warning("No compatible numeric analytes found.")
+        return
+
+    has_ref = [c for c in candidates if field_to_standard(c)]
+    default = has_ref if preset == PRESET_NAME else candidates[:min(5, len(candidates))]
+    chosen = st.multiselect("Choose constituent columns", candidates, default=default,
+                            key=f"chosen_{method}_{'bis' if preset == PRESET_NAME else 'manual'}")
+    if not chosen:
+        st.info("Select parameters to continue.")
+        return
+
+    if preset == PRESET_NAME:
+        reference_defaults, omitted = reference_dataframe(chosen, method)
+        if omitted:
+            st.warning("No defensible automatic BIS acceptable limit for: " + ", ".join(omitted) +
+                       ". They are excluded; choose Manual if you need to provide suitable limits.")
+        if reference_defaults.empty:
+            st.error("None of the chosen parameters has a matching preset standard.")
+            return
+    else:
+        reference_defaults = pd.DataFrame([{"Parameter": c, "Standard": None, "Ideal": None,
+                                           "Lower": None, "Weight": None} for c in chosen])
+
+    st.caption("Units: metals and dissolved constituents mg/L; pH unitless; turbidity NTU. The BIS preset uses *acceptable*, not relaxed permissible, limits.")
+    st.caption("Edit a value below if your official reference source or study method requires it. Blank Weight uses 1/Standard.")
+    ref_key = f"reference_{method}_{'bis' if preset == PRESET_NAME else 'manual'}_{hash(tuple(chosen))}"
+    reference = st.data_editor(reference_defaults, hide_index=True, use_container_width=True,
+                               disabled=["Parameter"], num_rows="fixed", key=ref_key)
+    if preset == PRESET_NAME:
+        st.caption(f"Source: BIS IS 10500:2012 acceptable-limit screening. {SOURCE_URL}")
+    if any(c in reference['Parameter'].values for c in ("Cr_mg_L", "Hg_mg_L")):
+        chemistry_confirmed = st.checkbox("I have checked chromium/mercury analyte identity and units against the reference method.", value=False)
+    else:
+        chemistry_confirmed = True
+    if method == "WPI":
+        st.info("WPI here is a *defined mean normalized ratio* (Q/100), not a universal official index. A BIS limit preset does not make the WPI formula regulatory.")
+    elif method == "WQI":
+        st.caption("Weighted arithmetic WQI. pH uses the two-sided 6.5–8.5 range. DO has no automatic BIS entry in this preset.")
+    else:
+        st.caption("Heavy Metal Pollution Index: weighted mean of 100 × |C − Ideal| / (Standard − Ideal).")
+    st.warning("These indices do not establish water potability. Your uploaded values have not been independently verified; synthetic data remain synthetic.")
+    if st.button("Calculate and show on map", type="primary", key="apply_index"):
+        try:
+            if not chemistry_confirmed:
+                raise ValueError("Confirm analyte identity before using the chromium or mercury preset.")
+            score, details = calculate_indices(samples, method, reference)
+            if score.notna().sum() < 3:
+                raise ValueError("Need at least three complete sample sites to show a spatial index map")
+            result_key = f"{method} ({'BIS acceptable screening' if preset == PRESET_NAME else 'manual limits'})"
+            st.session_state["water_index_result"] = {
+                "signature": dataset_signature, "field": "__WaterIndexScore",
+                "label": result_key, "method": method, "score": score.to_list(),
+                "table": details, "configuration": reference,
+                "source": preset,
+            }
+            st.session_state["index_pending_select"] = result_key
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Could not calculate index: {exc}")
+
+
+def keyname(name):
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+ALIASES = {
+    "Site_ID": ["siteid", "sampleid", "stationid", "locationid", "pointid", "id", "samplecode"],
+    "Site_Name": ["sitename", "stationname", "locationname", "samplinglocation", "place", "site", "name"],
+    "Latitude": ["latitude", "lat", "latdd", "ycoordinate", "ycoord", "gpslat", "northingwgs84"],
+    "Longitude": ["longitude", "long", "lon", "lng", "longdd", "xcoordinate", "xcoord", "gpslon", "eastingwgs84"],
+    "Temperature_C": ["temperaturec", "temperature", "temperatur", "tempc", "watertemp", "watertemperature", "temp", "tempdegc"],
+    "Parameter": ["parameter", "analyte", "metal", "indicator", "testname", "parametername"],
+    "Value": ["value", "result", "reading", "concentration", "measurement", "resultvalue"],
+}
+SYMBOLS = {"Pb": "Pb_mg_L", "Cd": "Cd_mg_L", "Cr": "Cr_mg_L", "As": "As_mg_L", "Hg": "Hg_mg_L", "Ni": "Ni_mg_L", "Cu": "Cu_mg_L", "Zn": "Zn_mg_L", "Fe": "Fe_mg_L", "Mn": "Mn_mg_L"}
+NAMES = {"lead": "Pb", "cadmium": "Cd", "chromium": "Cr", "arsenic": "As", "mercury": "Hg", "nickel": "Ni", "copper": "Cu", "zinc": "Zn", "iron": "Fe", "manganese": "Mn"}
+
+
+def guess_column(columns, wanted):
+    normalized = {keyname(c): c for c in columns}
+    for name in [wanted] + ALIASES.get(wanted, []):
+        if keyname(name) in normalized:
+            return normalized[keyname(name)]
+    return None
+
+
+def standard_measure(column):
+    key = keyname(column)
+    if key in [keyname(x) for x in ALIASES["Temperature_C"]] or key == "temperaturec":
+        return "Temperature_C"
+    physical = {
+        "ph": "pH", "phvalue": "pH", "waterph": "pH",
+        "tds": "TDS_mg_L", "tdsmgl": "TDS_mg_L", "totaldissolvedsolids": "TDS_mg_L",
+        "ec": "EC_uS_cm", "ecuscm": "EC_uS_cm", "electricalconductivity": "EC_uS_cm",
+        "turbidity": "Turbidity_NTU", "turbidityntu": "Turbidity_NTU",
+        "do": "DO_mg_L", "domgl": "DO_mg_L", "dissolvedoxygen": "DO_mg_L",
+        "bod": "BOD_mg_L", "bodmgl": "BOD_mg_L",
+        "cod": "COD_mg_L", "codmgl": "COD_mg_L",
+        "salinity": "Salinity", "salinityppt": "Salinity",
+        "chloridem": "Chloride_mg_L", "chloridemgl": "Chloride_mg_L",
+        "sulphatem": "Sulphate_mg_L", "sulphatemgl": "Sulphate_mg_L",
+        "nitratemg": "Nitrate_mg_L", "nitratemgl": "Nitrate_mg_L",
+        "fluoridem": "Fluoride_mg_L", "fluoridemgl": "Fluoride_mg_L",
+        "alkalinity": "Alkalinity_mg_L", "totalhard": "Total_Hardness_mg_L",
+        "totalhardness": "Total_Hardness_mg_L",
+        "turbiditym": "Turbidity_NTU",
+    }
+    if key in physical:
+        return physical[key]
+    if key in [keyname(x) for x in METALS.values()]:
+        return next(v for v in METALS.values() if keyname(v) == key)
+    for symbol, target in SYMBOLS.items():
+        k = symbol.lower()
+        if key in (k, k + "mgl", k + "ppm", k + "concentration", k + "mgperlitre", k + "mgperl"):
+            return target
+    for word, sym in NAMES.items():
+        if key in (word, word + "mgl", word + "ppm", word + "concentration"):
+            return SYMBOLS[sym]
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def read_tabular(blob, filename):
+    if len(blob) > MAX_UPLOAD_BYTES:
+        raise ValueError("File exceeds 25 MB")
+    encodings = ("utf-8-sig", "utf-16", "cp1252", "latin-1")
+    errors = []
+    for enc in encodings:
+        try:
+            data = pd.read_csv(io.BytesIO(blob), sep=None, engine="python", encoding=enc, dtype=str, on_bad_lines="error")
+            if len(data.columns) == 1:
+                # Try common alternate separators, especially for unusual header encodings
+                for delimiter in (",", ";", "\t", "|"):
+                    candidate = pd.read_csv(io.BytesIO(blob), sep=delimiter, encoding=enc, dtype=str)
+                    if len(candidate.columns) > len(data.columns):
+                        data = candidate
+            data.columns = [str(c).strip().lstrip("\ufeff") for c in data.columns]
+            data = data.dropna(how="all")
+            if data.empty:
+                raise ValueError("CSV has no data rows")
+            if len(set(data.columns)) != len(data.columns):
+                raise ValueError("Duplicate column headers")
+            return data
+        except Exception as exc:
+            errors.append(f"{enc}: {str(exc)[:80]}")
+    raise ValueError("Cannot parse CSV. Check encoding, delimiter and rows. " + " | ".join(errors[:2]))
+
+
+def number_series(values):
+    # Supports dot-decimal, comma-decimal, and thousands-separated numerics.
+    s = values.astype("string").str.strip().str.replace("\u00a0", "", regex=False)
+    if s.str.contains(",", regex=False).any():
+        both = s.str.contains(r"\d[,.]\d", regex=True)
+        sample = s[both].dropna().head(20)
+        if len(sample) and sample.str.contains(r"\d+,\d+$", regex=True).mean() >= .75 and not sample.str.contains(r"\.", regex=True).any():
+            s = s.str.replace(",", ".", regex=False)
+        else:
+            s = s.str.replace(",", "", regex=False)
+    return pd.to_numeric(s, errors="coerce")
+
+
+def parse_boundary(upload):
+    """Read a polygon GeoJSON or shapefile ZIP; DBF is optional for geometry-only boundaries."""
+    blob = upload.getvalue()
+    if len(blob) > MAX_UPLOAD_BYTES:
+        raise ValueError("Boundary exceeds 25 MB")
+
+    if upload.name.lower().endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+            members = [m for m in archive.infolist() if not m.is_dir()]
+            if len(members) > 60 or sum(m.file_size for m in members) > MAX_ZIP_UNPACKED:
+                raise ValueError("ZIP exceeds extraction limit")
+
+            # Accept components inside one parent folder, plus optional metadata.
+            # Do not extract paths from untrusted ZIP archives to the filesystem.
+            components = {}
+            for member in members:
+                p = Path(member.filename.replace("\\", "/"))
+                if p.is_absolute() or ".." in p.parts or len(p.parts) > 3:
+                    raise ValueError("ZIP contains an unsafe or overly nested path")
+                if p.suffix.lower() not in {".shp", ".shx", ".dbf", ".prj", ".cpg", ".xml", ".sbn", ".sbx"}:
+                    continue
+                key = p.name.lower()
+                if key in components:
+                    raise ValueError(f"Duplicate component filename: {p.name}")
+                components[key] = archive.read(member)
+
+            shp_names = [name for name in components if name.endswith(".shp")]
+            if len(shp_names) != 1:
+                raise ValueError("Each ZIP must contain exactly one .shp boundary file")
+            base = shp_names[0][:-4]
+            prj_data = components.get(base + ".prj")
+            if prj_data is None:
+                raise ValueError("Missing matching .prj: boundary CRS cannot be determined")
+            try:
+                crs = CRS.from_wkt(prj_data.decode("utf-8-sig"))
+            except Exception as exc:
+                raise ValueError(f"Invalid shapefile CRS in .prj: {exc}") from exc
+
+            shp_data = components[base + ".shp"]
+            shx_data = components.get(base + ".shx")
+            dbf_data = components.get(base + ".dbf")
+
+            # Read polygon geometry directly. No attribute table is necessary.
+            kwargs = {"shp": io.BytesIO(shp_data)}
+            if shx_data is not None:
+                kwargs["shx"] = io.BytesIO(shx_data)
+            if dbf_data is not None:
+                kwargs["dbf"] = io.BytesIO(dbf_data)
+            try:
+                with shapefile.Reader(**kwargs) as reader:
+                    geometries = [shape(record.__geo_interface__) for record in reader.shapes()]
+            except Exception as exc:
+                raise ValueError(f"Could not read shapefile geometry: {exc}") from exc
+            if not geometries:
+                raise ValueError("Shapefile contains no geometry")
+            frame = gpd.GeoDataFrame(geometry=geometries, crs=crs)
+    else:
+        # GeoJSON coordinates are assumed WGS84 by GeoPandas/GeoJSON convention.
+        frame = gpd.read_file(io.BytesIO(blob), driver="GeoJSON")
+
+    if frame.crs is None:
+        raise ValueError("Boundary has no CRS. Include .prj or WGS84 GeoJSON")
+    frame = frame.to_crs("EPSG:4326")
+    frame = frame[frame.geometry.notna() & ~frame.geometry.is_empty].copy()
+    if frame.empty or not frame.geom_type.isin(["Polygon", "MultiPolygon"]).all():
+        raise ValueError("Boundary must contain Polygon/MultiPolygon geometries")
+    if not frame.is_valid.all():
+        raise ValueError("Invalid polygons. Repair geometry before uploading")
+    return frame
+
+
+def normalize_one_csv(df, mapping, filename, file_no):
+    lat_field, lon_field, id_field, name_field = mapping
+    lat, lon = number_series(df[lat_field]), number_series(df[lon_field])
+    good = lat.between(-90, 90) & lon.between(-180, 180)
+    if not good.any():
+        raise ValueError("No valid WGS84 latitude/longitude pairs. Choose correct columns; projected metres are not supported")
+    copy = df.loc[good].copy()
+    copy["Latitude"], copy["Longitude"] = lat[good], lon[good]
+    if id_field is not None:
+        copy["Site_ID"] = df.loc[good, id_field].astype("string").fillna("").str.strip()
+    else:
+        copy["Site_ID"] = [f"F{file_no}-{i:04d}" for i in range(1, len(copy) + 1)]
+    if name_field is not None:
+        copy["Site_Name"] = df.loc[good, name_field].astype("string").fillna(copy["Site_ID"])
+    else:
+        copy["Site_Name"] = copy["Site_ID"]
+    # Long-form datasets: one parameter and one measurement per row.
+    # Convert to wide format for the GIS interpolation engine.
+    param_field = guess_column(df.columns, "Parameter")
+    value_field = guess_column(df.columns, "Value")
+    if param_field is not None and value_field is not None and param_field != value_field:
+        copy["__param"] = df.loc[good, param_field].astype(str).map(
+            lambda p: standard_measure(p) or str(p).strip()
+        )
+        copy["__value"] = number_series(df.loc[good, value_field])
+        copy = copy.pivot_table(
+            index=["Site_ID", "Site_Name", "Latitude", "Longitude"],
+            columns="__param", values="__value", aggfunc="mean"
+        ).reset_index()
+        copy.columns.name = None
+        numeric_cols = [c for c in copy.columns if c not in {"Site_ID", "Site_Name", "Latitude", "Longitude"}]
+        copy["Source_File"] = filename
+        frame = gpd.GeoDataFrame(copy, geometry=gpd.points_from_xy(copy.Longitude, copy.Latitude), crs="EPSG:4326")
+        return frame, len(df) - int(good.sum()), numeric_cols
+    protected = {lat_field, lon_field, id_field, name_field, "Latitude", "Longitude", "Site_ID", "Site_Name", "Dataset_Year", "Data_Status"}
+    used = []
+    for col in df.columns:
+        if col in protected:
+            continue
+        standard = standard_measure(col)
+        if standard:
+            numeric = number_series(df.loc[good, col])
+            if standard in copy and standard != col:
+                copy[standard] = number_series(copy[standard]).combine_first(numeric)
+            else:
+                copy[standard] = numeric
+            used.append(standard)
+        else:
+            # Retain other numeric parameters with their original names and generic units.
+            numeric = number_series(df.loc[good, col])
+            if numeric.notna().sum() and numeric.notna().sum() >= max(1, int(.6 * len(copy))):
+                if col not in protected and col not in ("Latitude", "Longitude"):
+                    copy[col] = numeric
+                    used.append(col)
+    copy["Source_File"] = filename
+    frame = gpd.GeoDataFrame(copy, geometry=gpd.points_from_xy(copy.Longitude, copy.Latitude), crs="EPSG:4326")
+    return frame, len(df) - len(frame), used
+
+
+
+# ----------------------------------------------------------
+# Single-screen dashboard shell (no global page scrolling)
+# ----------------------------------------------------------
+import streamlit.components.v1 as components
+
+st.markdown("""<style>
+html,body,[data-testid="stAppViewContainer"],.stApp {height:100vh;overflow:hidden!important;}
+[data-testid="stMain"] {height:100vh; overflow:hidden!important;}
+[data-testid="stMainBlockContainer"] {padding: 3.1rem 1.1rem .35rem!important;max-width:100%!important;}
+/* Do not hide the Streamlit header: it contains the sidebar reopen button. */
+[data-testid="stHeader"] {display:block!important;visibility:visible!important;z-index:1000!important;}
+[data-testid="stSidebarCollapsedControl"] {visibility:visible!important;}
+[data-testid="stSidebar"] {visibility:visible!important;}
+#MainMenu, footer {display:none!important;}
+[data-testid="stSidebar"] [data-testid="stSidebarContent"] {overflow-y:auto!important;}
+[data-testid="stVerticalBlock"] {gap:.35rem!important;}
+[data-testid="stMetric"] {padding:.25rem .5rem;border:1px solid rgba(127,127,127,.23);border-radius:9px;}
+[data-testid="stMetricLabel"] p {font-size:.77rem!important;}
+[data-testid="stMetricValue"] {font-size:1.35rem!important;}
+[data-testid="stHorizontalBlock"] {gap:.6rem!important;}
+[data-testid="stSelectbox"] label p, [data-testid="stRadio"] label p {font-size:.8rem!important;}
+section.main h1 {font-size:1.42rem!important;margin:0!important;padding:0!important;}
+section.main h2 {font-size:1rem!important;}
+[data-testid="stAlert"] {padding:.35rem .6rem!important;}
+/* make the MapLibre iframe use available viewport height */
+iframe[title="streamlit.components.v1.html"] {height:calc(100vh - 195px)!important;min-height:300px!important;}
+@media (max-height:750px) {iframe[title="streamlit.components.v1.html"] {height:calc(100vh - 295px)!important;min-height:260px!important;} }
+@media (max-width:900px) {html,body,[data-testid="stMain"] {overflow:auto!important;}}
+</style>""", unsafe_allow_html=True)
+
+# MapLibre at startup: a real interactive basemap, but no invented observations.
+def show_empty_map(height=550):
+    html = r"""<!doctype html><html><head><meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <link href="https://unpkg.com/maplibre-gl@6.16.0/dist/maplibre-gl.css" rel="stylesheet" />
+    <style>html,body,#map{height:100%;width:100%;margin:0}#map{position:absolute;inset:0}
+    .notice{position:absolute;top:12px;left:12px;max-width:340px;background:#fff;
+    color:#263342;padding:12px 15px;border-radius:9px;font:13px Arial;box-shadow:0 2px 10px #0003}
+    </style></head><body><div id="map"></div><div class="notice"><b>Map ready</b><div style="margin-top:6px">Upload a boundary and sampling CSV, then press Run Analysis. No data have been loaded.</div></div>
+    <script type="module">import * as ml from 'https://unpkg.com/maplibre-gl@6.16.0/dist/maplibre-gl.mjs';
+    const map=new ml.Map({container:'map',style:'https://tiles.openfreemap.org/styles/liberty',center:[80.27,13.08],zoom:9});
+    map.addControl(new ml.NavigationControl(),'top-right');
+    map.addControl(new ml.FullscreenControl(),'top-right');
+    </script></body></html>"""
+    components.html(html, height=height, scrolling=False)
+
+PHYSICAL = {
+    "pH": ("Mean pH", ""),
+    "TDS_mg_L": ("Mean TDS", "mg/L"),
+    "EC_uS_cm": ("Mean EC", "µS/cm"),
+    "Temperature_C": ("Mean temperature", "°C"),
+    "Turbidity_NTU": ("Mean turbidity", "NTU"),
+    "DO_mg_L": ("Mean DO", "mg/L"),
+    "BOD_mg_L": ("Mean BOD", "mg/L"),
+    "COD_mg_L": ("Mean COD", "mg/L"),
+}
+
+st.sidebar.header("GIS Data Management")
+st.sidebar.caption("Upload multiple boundaries or CSVs. No default study data are loaded.")
+boundary_uploads = st.sidebar.file_uploader("Polygon boundary (GeoJSON / ZIP)", type=["geojson", "json", "zip"], accept_multiple_files=True)
+csv_uploads = st.sidebar.file_uploader("Water quality CSV files", type=["csv"], accept_multiple_files=True)
+st.sidebar.download_button("Download sample CSV headers", "Site_ID,Site_Name,Latitude,Longitude,pH,TDS_mg_L,EC_uS_cm,Temperature_C,Pb_mg_L\n", file_name="water_quality_template.csv", mime="text/csv")
+source_status = st.sidebar.selectbox("Data status", ["Synthetic/test data", "Unverified observations"])
+
+parsed, mappings, csv_errors = [], [], []
+if csv_uploads:
+    with st.sidebar.expander("CSV columns and preview", expanded=False):
+        for idx, upload in enumerate(csv_uploads):
+            try:
+                raw = read_tabular(upload.getvalue(), upload.name)
+                columns = list(raw.columns)
+                guesses = [guess_column(columns, name) for name in ("Latitude", "Longitude", "Site_ID", "Site_Name")]
+                st.caption(f"{upload.name} · {len(raw)} records")
+                options = ["— Select —"] + columns
+                choices = []
+                for tag, guess in zip(("Latitude", "Longitude", "Site ID", "Site Name"), guesses):
+                    selection = st.selectbox(tag, options, index=options.index(guess) if guess in columns else 0, key=f"map_{idx}_{tag}")
+                    choices.append(None if selection == "— Select —" else selection)
+                st.dataframe(raw.head(3), width="stretch", height=110)
+                parsed.append((upload, raw))
+                mappings.append(tuple(choices))
+            except Exception as exc:
+                csv_errors.append(f"{upload.name}: {exc}")
+
+fingerprint = repr(([(u.name, hashlib.sha256(u.getvalue()).hexdigest()) for u in (boundary_uploads or [])+(csv_uploads or [])], mappings, source_status))
+run_clicked = st.sidebar.button("▶ Run Analysis", type="primary", width="stretch")
+if run_clicked:
+    st.session_state["run_fingerprint"] = fingerprint
+running = (st.session_state.get("run_fingerprint") == fingerprint)
+
+boundary, points, error_message = None, None, None
+if running and boundary_uploads and parsed and not csv_errors and len(parsed) == len(csv_uploads):
+    try:
+        parts = [parse_boundary(up) for up in boundary_uploads]
+        boundary = gpd.GeoDataFrame(pd.concat(parts,ignore_index=True), crs="EPSG:4326")
+        frames=[]
+        for idx, ((up,raw), mapping) in enumerate(zip(parsed,mappings),1):
+            if mapping[0] is None or mapping[1] is None or mapping[0]==mapping[1]:
+                raise ValueError(f"{up.name}: choose separate Latitude and Longitude columns under CSV columns and preview")
+            frame,dropped,fields=normalize_one_csv(raw,mapping,up.name,idx)
+            frames.append(frame)
+        points=gpd.GeoDataFrame(pd.concat(frames,ignore_index=True),crs="EPSG:4326")
+        if points.empty: raise ValueError("No valid sampling records")
+    except Exception as exc:
+        error_message = str(exc)
+        boundary,points=None,None
+elif run_clicked and not boundary_uploads:
+    error_message="Upload at least one boundary before running analysis"
+elif run_clicked and not csv_uploads:
+    error_message="Upload at least one sampling CSV before running analysis"
+elif csv_errors:
+    error_message=" | ".join(csv_errors)
+
+# Main viewport: compact toolbar and metrics, plus a map that is always visible.
+st.markdown("# Water Quality GIS Monitor")
+head_a,head_b=st.columns([3,1])
+head_a.caption("Interactive MapLibre · Spatial interpolation · Physical & chemical parameters")
+head_b.caption("Upload-only mode · " + source_status)
+
+# Restore configured index results only for the same uploaded dataset and mapping.
+active_index = st.session_state.get("water_index_result")
+if points is not None and active_index is not None:
+    if active_index.get("signature") == fingerprint and len(active_index.get("score", [])) == len(points):
+        points["__WaterIndexScore"] = pd.Series(active_index["score"], index=points.index)
+    else:
+        st.session_state.pop("water_index_result", None)
+        active_index = None
+
+parameters={}
+if points is not None:
+    for name,col in METALS.items():
+        if col in points and number_series(points[col]).notna().any():
+            parameters[name]=(col,"mg/L")
+    for col,(name,unit) in PHYSICAL.items():
+        if col in points and number_series(points[col]).notna().any():
+            parameters[name]=(col,unit)
+    ignored={"Latitude","Longitude","Site_ID","Site_Name","Source_File","geometry","Dataset_Year","Data_Status"}
+    ignored.update(METALS.values());ignored.update(PHYSICAL)
+    for col in points.columns:
+        if col in ignored or str(col).startswith("__"):continue
+        values=number_series(points[col]) if col!="geometry" else pd.Series(dtype=float)
+        if values.notna().any():parameters[f"Other: {col}"]=(col,"unit unspecified")
+
+if points is not None and active_index is not None and "__WaterIndexScore" in points:
+    parameters[active_index["label"]] = ("__WaterIndexScore", "index")
+
+pending_index = st.session_state.pop("index_pending_select", None)
+if pending_index is not None and pending_index in parameters:
+    st.session_state["control_group"] = "Pollution indices"
+    st.session_state["parameter_Pollution indices"] = pending_index
+
+# Reference-style controls: a light, bordered panel beside the always-visible map.
+# Group selections are computed from uploaded data (never synthetic defaults).
+GROUPS = ["Heavy metals", "Chemical parameters", "Physical parameters", "Pollution indices"]
+CHEMICAL_FIELDS = {"DO_mg_L", "BOD_mg_L", "COD_mg_L", "Chloride_mg_L", "Sulphate_mg_L", "Nitrate_mg_L", "Fluoride_mg_L", "Phosphate_mg_L", "Alkalinity_mg_L", "Total_Hardness_mg_L", "HCO3_mg_L", "CO3_mg_L", "Ca_mg_L", "Mg_mg_L", "Na_mg_L", "K_mg_L"}
+PHYSICAL_FIELDS = {"pH", "TDS_mg_L", "EC_uS_cm", "Temperature_C", "Turbidity_NTU", "Salinity"}
+
+def group_for(label, column):
+    if active_index and column == "__WaterIndexScore":
+        return "Pollution indices"
+    if column in METALS.values():
+        return "Heavy metals"
+    if column in PHYSICAL_FIELDS:
+        return "Physical parameters"
+    return "Chemical parameters"
+
+available_groups = [g for g in GROUPS if any(group_for(n, c) == g for n, (c, u) in parameters.items())]
+if "control_group" not in st.session_state:
+    st.session_state.control_group = available_groups[0] if available_groups else GROUPS[0]
+if available_groups and st.session_state.control_group not in available_groups:
+    st.session_state.control_group = available_groups[0]
+
+# Keep data stats above the map; the right panel controls the current selection.
+left, right = st.columns([3.5, 1.45], gap="medium")
+with right:
+    with st.container(border=True):
+        st.markdown("#### Explore the analysis controls")
+        group = st.radio("Parameter group", GROUPS, key="control_group", disabled=not bool(parameters))
+        choices = [n for n, (c, u) in parameters.items() if group_for(n, c) == group]
+        if not choices:
+            st.caption("No uploaded data available in this group.")
+        selected = st.selectbox("Parameter", choices or ["Upload data to select"], disabled=not choices, key=f"parameter_{group}")
+        # Screenshot-style IDW / Kriging switch; points-only mode is controlled separately.
+        interpolation = st.segmented_control("Interpolation method", ["IDW", "Kriging"], default="IDW", key="reference_interpolation")
+        opacity = st.slider("Raster opacity", min_value=0, max_value=100, value=70, step=5, format="%d%%", key="raster_opacity")
+        show_points = st.checkbox("Show sampling points", value=True, key="reference_show_points")
+        show_boundary = st.checkbox("Show study boundary", value=True, key="reference_show_boundary")
+        show_surface = st.checkbox("Show interpolation surface", value=True, key="reference_show_surface")
+        with st.expander("Advanced interpolation settings"):
+            resolution = st.slider("Grid width (cells)", 50, 180, 100, step=10)
+            power = st.slider("IDW power", 1.0, 4.0, 2.0, step=0.5)
+        config_text = f"{selected} · {interpolation} interpolation · {opacity}% opacity · Points {'visible' if show_points else 'hidden'} · Boundary {'visible' if show_boundary else 'hidden'} · Surface {'visible' if show_surface else 'hidden'}"
+        st.caption("**Current configuration**")
+        st.caption(config_text)
+        st.code(config_text, language=None)
+        st.caption("Use the copy icon on the configuration above.")
+        if points is not None:
+            if st.button("🧪 WQI / HPI / WPI maps", key="open_index_dialog", use_container_width=True):
+                open_indices_panel(points, fingerprint)
+            if st.button("📊 Piper Plot", key="open_piper_dialog", use_container_width=True):
+                open_piper_plot(points)
+            if active_index is not None and "__WaterIndexScore" in points:
+                st.download_button("Download calculated indices CSV", active_index["table"].to_csv(index=False).encode("utf-8-sig"), file_name=f"{active_index['method'].lower()}_values.csv", mime="text/csv", use_container_width=True)
+            with st.popover("Chart and data preview", use_container_width=True):
+                st.dataframe(points.drop(columns="geometry"), width="stretch", height=180)
+                st.download_button("Download merged CSV", points.drop(columns="geometry").to_csv(index=False).encode("utf-8-sig"), file_name="merged_water_quality.csv", mime="text/csv")
+
+field, unit = parameters.get(selected, (None, ""))
+valid = None
+if points is not None and field:
+    points[field] = number_series(points[field])
+    valid = points.dropna(subset=[field]).copy()
+
+with left:
+    stat_cols = st.columns(3)
+    stat_cols[0].metric("Sampling sites", str(len(points)) if points is not None else "—")
+    stat_cols[1].metric("Mean selected", f"{valid[field].mean():.3f} {unit}" if valid is not None and not valid.empty else "—")
+    st.markdown("**Interactive GIS map**")
+    if error_message:
+        st.error(error_message)
+    elif not boundary_uploads or not csv_uploads:
+        st.caption("Map ready. Upload a polygon boundary and CSV from the sidebar, then click Run Analysis.")
+    elif not running:
+        st.caption("Review the CSV mappings in the sidebar and click Run Analysis.")
+    overlay, overlay_bounds = None, None
+    if points is not None and field and valid is not None and not valid.empty and show_surface:
+        try:
+            with st.spinner(f"Rendering {interpolation} surface..."):
+                overlay, overlay_bounds, _ = create_surface(boundary, valid, field, interpolation, resolution, power)
+        except Exception as exc:
+            st.warning(f"{interpolation} interpolation unavailable: {exc}")
+    if boundary is not None and valid is not None and not valid.empty:
+        show_maplibre(boundary=boundary, samples=points, metal_column=field,
+            site_column="Site_Name", height=600, overlay_image=overlay,
+            overlay_bounds=overlay_bounds, value_unit=unit,
+            raster_opacity=opacity / 100.0, show_points=show_points,
+            show_boundary=show_boundary)
+    else:
+        show_empty_map(height=600)
+
+# Compact physical parameter summary, only from actual uploaded values.
+if points is not None:
+    with st.sidebar.expander("Physical parameter means", expanded=False):
+        for col, (label, suffix) in PHYSICAL.items():
+            if col in points:
+                s = number_series(points[col]).dropna()
+                if not s.empty:
+                    st.caption(f"{label}: {s.mean():.2f} {suffix}")
