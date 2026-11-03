@@ -6,9 +6,12 @@ from PIL import Image
 import geopandas as gpd
 from shapely.geometry import Point
 from shapely.prepared import prep
+from risk_classes import classify
 
 
-def create_surface(boundary, samples, column, method="IDW", resolution=100, power=2.0):
+def create_surface(boundary, samples, column, method="IDW", resolution=100, power=2.0,
+                   risk_threshold=None, risk_direction="Above", risk_lower=None,
+                   return_risk=False, moderate_fraction=0.75):
     # Project before calculating distances: longitude/latitude degrees are not metres.
     projected = samples.dropna(subset=[column, "geometry"]).to_crs('EPSG:32644')
     projected = projected[(~projected.geometry.is_empty) & (projected.geometry.geom_type == 'Point')].copy()
@@ -53,18 +56,48 @@ def create_surface(boundary, samples, column, method="IDW", resolution=100, powe
     finite = surface[np.isfinite(surface) & mask]
     if finite.size == 0:
         raise ValueError('No interpolated grid cells inside boundary.')
-    lo, hi = float(values.min()),float(values.max())
+    lo, hi = float(finite.min()), float(finite.max())
     span=max(hi-lo,1e-12)
     t=np.clip((surface-lo)/span,0,1)
-    # green -> yellow -> red (relative to observed data range)
+    # green -> yellow -> red (scaled to INTERPOLATED cell range, within boundary)
     rgb=np.empty((*t.shape,4),dtype=np.uint8)
     rgb[:,:,0]=np.where(t<.5, 40+420*t, 250).astype('uint8')
     rgb[:,:,1]=np.where(t<.5, 145+190*t, 240-420*(t-.5)).clip(0,255).astype('uint8')
     rgb[:,:,2]=np.where(t<.5, 75-120*t, 10).clip(0,255).astype('uint8')
     rgb[:,:,3]=np.where(mask & np.isfinite(surface), 190, 0).astype('uint8')
+    risk_image = None
+    risk_area_km2 = None
+    if return_risk and risk_threshold is not None:
+        classifications = classify(surface, risk_threshold, risk_direction,
+                                   risk_lower, moderate_fraction)
+        valid_grid = mask & np.isfinite(surface)
+        high = (classifications == "High") & valid_grid
+        moderate = (classifications == "Moderate") & valid_grid
+        low = (classifications == "No risk flag") & valid_grid
+        risk_pixels = np.zeros((*high.shape, 4), dtype=np.uint8)
+        risk_pixels[low] = [34, 197, 94, 210]        # green: low / not flagged
+        risk_pixels[moderate] = [250, 204, 21, 225]  # yellow: early-warning band
+        risk_pixels[high] = [239, 68, 68, 230]     # red: reference exceedance
+        image = Image.fromarray(np.flipud(risk_pixels), "RGBA")
+        risk_buffer = BytesIO()
+        image.save(risk_buffer, format="PNG")
+        risk_image = "data:image/png;base64," + b64encode(risk_buffer.getvalue()).decode()
+        # Approximate pixel-centre area. Not a validated geographic risk boundary.
+        cell_w = (xmax - xmin) / max(nx - 1, 1)
+        cell_h = (ymax - ymin) / max(ny - 1, 1)
+        area_factor = cell_w * cell_h / 1_000_000
+        risk_area_km2 = {
+            "low": float(low.sum() * area_factor),
+            "moderate": float(moderate.sum() * area_factor),
+            "high": float(high.sum() * area_factor),
+        }
     im=Image.fromarray(np.flipud(rgb),'RGBA')
     buf=BytesIO(); im.save(buf,format='PNG')
     # geographic bounding rectangle for MapLibre image overlay
     corners=gpd.GeoSeries([Point(xmin,ymin),Point(xmax,ymax)],crs='EPSG:32644').to_crs('EPSG:4326')
     lons=[g.x for g in corners]; lats=[g.y for g in corners]
-    return 'data:image/png;base64,'+b64encode(buf.getvalue()).decode(),[min(lons),min(lats),max(lons),max(lats)],(lo,hi)
+    result = ('data:image/png;base64,' + b64encode(buf.getvalue()).decode(),
+              [min(lons),min(lats),max(lons),max(lats)], (lo,hi))
+    if return_risk:
+        return (*result, risk_image, risk_area_km2)
+    return result

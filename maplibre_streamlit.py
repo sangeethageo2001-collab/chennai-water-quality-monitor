@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 import geopandas as gpd
 import streamlit.components.v1 as components
+from risk_classes import classify
 
 SATELLITE_STYLE = {
     "version": 8,
@@ -41,7 +42,24 @@ def show_maplibre(boundary: gpd.GeoDataFrame,
                   height: int = 650,
                   overlay_image: str | None = None,
                   overlay_bounds: list | None = None,
-                  value_unit: str = "mg/L"):
+                  value_unit: str = "mg/L", raster_opacity: float = 0.70,
+                  show_points: bool = True, show_boundary: bool = True,
+                  point_color: str = "#FF0000",
+                  default_basemap: str = "Satellite (Esri World Imagery)",
+                  parameter_label: str | None = None,
+                  parameter_group: str = "Heavy metals",
+                  interpolation_method: str | None = None,
+                  interpolation_range: tuple | None = None,
+                  risk_threshold: float | None = None,
+                  risk_threshold_direction: str = "Above",
+                  risk_lower: float | None = None,
+                  risk_reference: str | None = None,
+                  risk_zone_image: str | None = None,
+                  risk_zone_area_km2: dict | None = None,
+                  moderate_fraction: float = 0.75,
+                  risk_site_indices: list | None = None,
+                  highlighted_indices: list | None = None,
+                  ):
     """Draw boundary + sample points. Inputs should have a defined CRS."""
     if boundary.crs is None or samples.crs is None:
         raise ValueError("Both GeoDataFrames need a CRS. Assign the correct source CRS before calling this function.")
@@ -63,15 +81,24 @@ def show_maplibre(boundary: gpd.GeoDataFrame,
         raise ValueError(f"No numeric concentrations in {metal_column}")
     q1 = float(valid_values.quantile(1 / 3))
     q2 = float(valid_values.quantile(2 / 3))
-    for i, (_, row) in enumerate(points.iterrows(), start=1):
+    risk_site_indices = set(risk_site_indices or [])
+    highlighted_indices = set(highlighted_indices or [])
+    for i, (idx, row) in enumerate(points.iterrows(), start=1):
         geom = row.geometry
         value = pd.to_numeric(pd.Series([row[metal_column]]), errors="coerce").iloc[0]
         if geom is None or geom.is_empty or geom.geom_type != "Point" or pd.isna(value):
             continue
         label = str(row[site_column]) if site_column and pd.notna(row[site_column]) else f"Sample {i}"
+        observed_risk = "Unavailable"
+        if risk_threshold is not None:
+            observed_risk = str(classify([float(value)], risk_threshold,
+                           risk_threshold_direction, risk_lower, moderate_fraction)[0])
         features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [float(geom.x), float(geom.y)]},
                          "properties": {"site": label, "value": float(value), "metal": metal_column,
-                                        "longitude": round(float(geom.x), 6), "latitude": round(float(geom.y), 6)}})
+                                        "longitude": round(float(geom.x), 6), "latitude": round(float(geom.y), 6),
+                                        "predicted_flagged": bool(idx in risk_site_indices),
+                                        "is_highlighted": bool(idx in highlighted_indices),
+                                        "observed_class": observed_risk}})
     sample_json = {"type": "FeatureCollection", "features": features}
 
     def safe_json(obj):
@@ -89,6 +116,22 @@ def show_maplibre(boundary: gpd.GeoDataFrame,
         "__OVERLAY__": safe_json(overlay_image),
         "__OVERLAY_BOUNDS__": safe_json(overlay_bounds),
         "__UNIT__": safe_json(value_unit),
+        "__RASTER_OPACITY__": safe_json(float(raster_opacity)),
+        "__SHOW_POINTS__": safe_json(bool(show_points)),
+        "__SHOW_BOUNDARY__": safe_json(bool(show_boundary)),
+        "__POINT_COLOR__": safe_json(point_color),
+        "__DEFAULT_BASEMAP__": safe_json(default_basemap),
+        "__PARAMETER_LABEL__": safe_json(parameter_label or metal_column),
+        "__PARAMETER_GROUP__": safe_json(parameter_group),
+        "__INTERP_METHOD__": safe_json(interpolation_method),
+        "__INTERP_RANGE__": safe_json(interpolation_range),
+        "__RISK_THRESHOLD__": safe_json(risk_threshold),
+        "__RISK_DIRECTION__": safe_json(risk_threshold_direction),
+        "__RISK_REFERENCE__": safe_json(risk_reference),
+        "__RISK_ZONE_IMAGE__": safe_json(risk_zone_image),
+        "__RISK_ZONE_AREA__": safe_json(risk_zone_area_km2),
+        "__MODERATE_FRACTION__": safe_json(moderate_fraction),
+        "__HIGHLIGHT_ACTIVE__": safe_json(highlighted_indices is not None and len(highlighted_indices) > 0),
     }
     for key, value in replacements.items():
         template = template.replace(key, value)
