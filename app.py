@@ -472,7 +472,7 @@ PHYSICAL = {
 st.sidebar.markdown('<div class="aqua-side-brand">AquaSpatial</div>', unsafe_allow_html=True)
 st.sidebar.markdown('<div class="aqua-nav-caption">DATA MANAGEMENT</div>', unsafe_allow_html=True)
 st.sidebar.header("GIS Data Management")
-st.sidebar.caption("Upload study boundaries and one or more CSV files to analyze water quality.")
+st.sidebar.caption("Upload study boundaries and one or more CSV files to analyze water quality. Files stay within the current analysis session; do not upload confidential data without an approved hosting policy.")
 boundary_uploads = st.sidebar.file_uploader("Polygon boundary (GeoJSON / ZIP)", type=["geojson", "json", "zip"], accept_multiple_files=True)
 csv_uploads = st.sidebar.file_uploader("Water quality CSV files", type=["csv"], accept_multiple_files=True)
 st.sidebar.download_button("Download sample CSV headers", "Site_ID,Site_Name,Latitude,Longitude,pH,TDS_mg_L,EC_uS_cm,Temperature_C,Pb_mg_L\n", file_name="water_quality_template.csv", mime="text/csv")
@@ -876,7 +876,7 @@ with right:
                 default="All", key=f"risk_category_filter_{workspace}_{group}_{selected}")
         else:
             chosen_risk = "All"
-            st.caption("Risk classes need valid observations and an applicable screening limit.")
+            st.caption("Risk classes require valid observations and an applicable screening threshold; they are application-defined screening categories.")
         if points is not None:
             total = len(points)
             available = len(valid) if valid is not None else 0
