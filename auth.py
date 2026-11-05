@@ -5,6 +5,8 @@ For sensitive client data, use managed identity and server-side
 access controls in addition to this application login.
 """
 
+import base64
+from pathlib import Path
 import hashlib
 import hmac
 import re
@@ -110,10 +112,38 @@ def require_login() -> None:
             background: rgba(255,255,255,0.85);
             padding: 16px;
         }
+        .pm-login-brand {
+            position: fixed;
+            left: 22px;
+            bottom: 19px;
+            z-index: 3;
+            width: 90px;
+            opacity: .58;
+            pointer-events: none;
+        }
+        .pm-login-brand img { display: block; width: 100%; height: auto; }
+        @media (max-width: 720px) {
+            .pm-login-brand { width: 58px; left: 9px; bottom: 8px; opacity: .4; }
+        }
+        div[data-testid="stFormSubmitButton"] button[kind="primary"] {
+            background: #087EAC !important;
+            border: 1px solid #087EAC !important;
+        }
         </style>
         """,
         unsafe_allow_html=True
     )
+
+    # Transparent PM corner branding, available locally and on Streamlit Cloud.
+    logo_path = Path(__file__).resolve().with_name("pm_logo_transparent.png")
+    if logo_path.is_file():
+        logo_b64 = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+        st.markdown(
+            f'<div class="pm-login-brand" aria-hidden="true">'
+            f'<img src="data:image/png;base64,{logo_b64}" alt="" />'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
     # ----------------------------------------
     # 3. LOAD CONFIGURED USERS
